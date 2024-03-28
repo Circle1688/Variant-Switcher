@@ -19,7 +19,7 @@ class VariantSetEditableDelegate(ui.AbstractItemDelegate):
         super().__init__()
         self.subscription = None
         self.variant_set_name = None
-        self.variant_set_path = None
+        self.variant_set_path = "/VariantSwitcherCache"
 
     def build_branch(self, model, item, column_id, level, expanded):
         """Create a branch widget that opens or closes subtree"""
