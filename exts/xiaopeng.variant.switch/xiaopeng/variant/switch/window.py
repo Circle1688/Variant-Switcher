@@ -2,7 +2,7 @@ import omni.ext
 import omni.ui as ui
 import omni.kit.commands
 import omni.usd
-from typing import Union
+from typing import Union, List
 from pxr import Usd, Sdf, UsdGeom, UsdShade
 import os
 from .style import STOP_BUTTON, BUTTON, STRING_FIELD, TOOL_BUTTON
@@ -10,6 +10,11 @@ from omni.kit.widget.stage import StageWidget
 from omni.kit.widget.stage import StageIcons
 from .delegate import VariantSetEditableDelegate, EditableDelegate
 from .model import VariantItem, VariantModel, VariantSetItem, VariantSetModel  
+
+from omni.kit.window.filepicker import FilePickerDialog
+from omni.kit.widget.filebrowser import FileBrowserItem
+from omni.kit.window.popup_dialog import MessageDialog
+from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file
 
 class VariantSwitchWindow(ui.Window):
     def __init__(self, title: str, delegate=None, **kwargs):
@@ -22,7 +27,55 @@ class VariantSwitchWindow(ui.Window):
         self.current_variant_set_selections = None
         self.current_variant_selections = None
 
+        self._filepicker = None
+        self._filepicker_selected_folder = ""
+
         self.frame.set_build_fn(self._build_fn)
+
+        self.add_frame_count = 0  # count the frame
+        self._wait_frame = False
+        self.current_switch_index = 0
+        self.start_batch = False
+        self.file_name = ""
+
+        self.subscription_handle = omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(self.on_update, name="UPDATE_SUB")
+
+    def on_update(self, p):
+        if self.start_batch:
+            self._batch_progress_bar.visible = True
+            if self.add_frame_count > 0:
+                self.add_frame_count -= 1
+                if self.add_frame_count == 0:  
+                    path = os.path.join(self._filepicker_selected_folder, self.file_name)
+                    self.screenshot(path)
+                    self.current_switch_index += 1
+                    self._wait_frame = False
+                    self.add_frame_count = 0
+
+            elif not self._wait_frame and self.add_frame_count == 0:
+                items = self._variant_model._children
+                if self.current_switch_index < len(items):
+                    self._batch_progress_bar.model.set_value(self.current_switch_index / len(items))
+                    item = items[self.current_switch_index]
+                    self._variant_model.set_variant_on(item)
+                    self.file_name = item.name_model.get_value_as_string() + ".png"
+                    self._wait_frame = True
+                    self.add_frame_count = 500
+                else:
+                    self.start_batch = False
+                    self._batch_progress_bar.visible = False
+                    dialog = MessageDialog(
+                        title="Batch Render",
+                        message="Done",
+                        ok_handler=self._done_handler,
+                        ok_label="OK",
+                        disable_cancel_button=True
+                    )
+                    dialog.show()
+
+    def _done_handler(self, dialog):
+        dialog.hide()
+                    
 
     def destroy(self):
         # It will destroy all the children
@@ -30,6 +83,7 @@ class VariantSwitchWindow(ui.Window):
 
     def on_shutdown(self):
         self._win = None
+        self.subscription_handle = None
 
     def show(self):
         self.visible = True
@@ -50,6 +104,10 @@ class VariantSwitchWindow(ui.Window):
                         self.variant_set_path.model.set_value('/VariantSwitcherCache')
                     ui.Button(f" {omni.kit.ui.get_custom_glyph_code('${glyphs}/menu_refresh.svg')}  Load ",
                                  width=0, height=22, clicked_fn=self.load_cache)
+                
+                with ui.HStack(spacing=5, height=0):
+                    ui.Button("Batch Screenshot", width=0, height=22, clicked_fn=self.show_screenshot_save_dir)
+                    self._batch_progress_bar = ui.ProgressBar(visible=False)
                     
                 with ui.HStack(spacing=5):
                     
@@ -100,7 +158,7 @@ class VariantSwitchWindow(ui.Window):
                         ):
                             self._name_value_delegate = EditableDelegate()
                             self._variant_model = VariantModel()
-                            tree_view = ui.TreeView(
+                            self._varient_tree_view = ui.TreeView(
                                 self._variant_model,
                                 delegate=self._name_value_delegate,
                                 selection_changed_fn=self.variant_changed,
@@ -109,6 +167,59 @@ class VariantSwitchWindow(ui.Window):
                                 style_type_name_override="TreeView",
                                 drop_between_items=True,
                             )
+
+    def show_screenshot_save_dir(self):
+        items = self._variant_model._children
+        if len(items) == 0:
+            dialog = MessageDialog(
+                title="Batch Render",
+                message="Please select a variant set!",
+                ok_handler=self._done_handler,
+                ok_label="OK",
+                disable_cancel_button=True
+            )
+            dialog.show()
+        else:
+            if self._filepicker is None:
+                self._filepicker = FilePickerDialog(
+                        "Select Save Folder",
+                        # show_only_collections=["my-computer"],
+                        apply_button_label="Select",
+                        item_filter_fn=lambda item: self._on_filepicker_filter_item(item),
+                        selection_changed_fn=lambda items: self._on_filepicker_selection_change(items),
+                        click_apply_handler=lambda filename, dirname: self._on_dir_pick(self._filepicker, filename, dirname),
+                    )
+            self._filepicker.set_filebar_label_name("Folder Name: ")
+            self._filepicker.refresh_current_directory()
+            self._filepicker.show()
+        
+    def _on_filepicker_filter_item(self, item: FileBrowserItem) -> bool:
+        if not item or item.is_folder:
+            return True
+        return False
+    
+    def _on_filepicker_selection_change(self, items: [FileBrowserItem] = []):
+        last_item = items[-1]
+        self._filepicker.set_filename(last_item.name)
+        self._filepicker_selected_folder = last_item.path
+
+    def _on_dir_pick(self, dialog: FilePickerDialog, filename: str, dirname: str):
+        dialog.hide()
+        self.current_switch_index = 0
+        self.start_batch = True
+        # items = self._variant_model._children
+        # for item in items:
+        #     self._wait_frame = True
+        #     self._variant_model.set_variant_on(item)
+        #     file_name = item.name_model.get_value_as_string() + ".png"
+        #     path = os.path.join(self._filepicker_selected_folder, file_name)
+        #     self.screenshot(path)
+        #     print("screenshot" + file_name)
+
+    def screenshot(self, filename: str):
+        vp_api = get_active_viewport()
+        capture_viewport_to_file(vp_api, filename)
+
 
     def variant_set_changed(self, selections):
         self.current_variant_set_selections = selections
